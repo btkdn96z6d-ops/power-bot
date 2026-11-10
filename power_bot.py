@@ -1,3 +1,4 @@
+
 """Світлобот: стежить через хмару Tapo, чи розетка онлайн, і пише в Telegram."""
 import base64
 import datetime as dt
@@ -156,4 +157,28 @@ def main():
     state = {}
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE) as f:
-            state
+            state = json.load(f)
+
+    prev = state.get("online")
+    if prev is None:
+        print(f"Перший запуск: світло {'є' if online else 'немає'}.")
+        state = {"online": online, "since": now.isoformat()}
+    elif prev != online:
+        since = dt.datetime.fromisoformat(state["since"])
+        dur = fmt_duration((now - since).total_seconds())
+        t = now.strftime("%H:%M")
+        if online:
+            send(f"🟢 Світло з'явилося ({t})\nБез світла було: {dur}")
+        else:
+            send(f"🔴 Світла немає ({t})\nСвітло було: {dur}")
+        state = {"online": online, "since": now.isoformat()}
+        print("Статус змінився, повідомлення надіслано.")
+    else:
+        print(f"Без змін: світло {'є' if online else 'немає'}.")
+
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f, ensure_ascii=False)
+
+
+if __name__ == "__main__":
+    main()
