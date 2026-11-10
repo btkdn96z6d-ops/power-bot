@@ -45,6 +45,46 @@ def fmt_duration(seconds):
     return f"{h} год {m} хв" if h else f"{m} хв"
 
 
+DEVICE_TYPES = ["SMART.TAPOPLUG", "SMART.TAPOBULB", "SMART.TAPOHUB",
+                "SMART.IPCAMERA", "SMART.TAPOSWITCH", "SMART.KASAPLUG"]
+
+
+def extract(result):
+    if not isinstance(result, dict):
+        return []
+    for key in ("deviceList", "deviceInfoList", "list"):
+        if isinstance(result.get(key), list):
+            return result[key]
+    return []
+
+
+def get_devices(api, token):
+    attempts = [
+        ("v1 getDeviceList", lambda: api._request_post_v1(
+            {"method": "getDeviceList"}, token)),
+        ("v1 getDeviceListByPage", lambda: api._request_post_v1(
+            {"method": "getDeviceListByPage",
+             "params": {"deviceTypeList": DEVICE_TYPES, "index": 0, "limit": 50}},
+            token)),
+        ("v2 getDeviceListByPage", lambda: api._request_post_v2(
+            api.host, "/api/v2/common/getDeviceListByPage",
+            {"deviceTypeList": DEVICE_TYPES, "index": 0, "limit": 50}, token)),
+        ("v2 getDeviceList", lambda: api._request_post_v2(
+            api.host, "/api/v2/common/getDeviceList", {}, token)),
+    ]
+    for label, call in attempts:
+        try:
+            r = call()
+        except Exception as e:
+            print(f"[{label}] помилка запиту: {type(e).__name__}")
+            continue
+        devs = extract(r.result)
+        print(f"[{label}] error_code={r.error_code} msg={r.msg!r} пристроїв={len(devs)}")
+        if r.successful and devs:
+            return devs
+    return []
+
+
 def main():
     api = TPLinkApi(cloud_type="tapo", term_id="power-bot-" + hashlib.md5(EMAIL.encode()).hexdigest()[:12])
     try:
@@ -52,7 +92,7 @@ def main():
     except Exception as e:
         sys.exit(f"Помилка входу в хмару Tapo: {type(e).__name__}: {e}")
     token = result.get("token")
-    devices = api.get_device_info_list(token)
+    devices = get_devices(api, token)
 
     print("Пристрої в хмарі Tapo:")
     for d in devices:
