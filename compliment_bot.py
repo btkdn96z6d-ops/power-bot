@@ -65,7 +65,8 @@ COMPLIMENTS = [
 def main():
     day = dt.date.today().toordinal()
     random.seed(day)
-    text = random.choice(COMPLIMENTS)
+    # Якщо при ручному запуску вказано свій текст — надсилаємо його
+    text = os.environ.get("CUSTOM_TEXT", "").strip() or random.choice(COMPLIMENTS)
     data = urllib.parse.urlencode({"chat_id": TG_CHAT, "text": text}).encode()
     urllib.request.urlopen(
         f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", data=data, timeout=30
