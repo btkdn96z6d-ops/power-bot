@@ -1,4 +1,3 @@
-
 """Світлобот: стежить через хмару Tapo, чи розетка онлайн, і пише в Telegram."""
 import base64
 import datetime as dt
@@ -11,7 +10,7 @@ import urllib.request
 import uuid
 from zoneinfo import ZoneInfo
 
-from tplinkcloud.certs import get_ca_cert_path  # сертифікат TP-Link
+from tplinkcloud.certs import get_ca_cert_path
 from tplinkcloud.client import TPLinkApi
 
 CLOUD = "https://n-wap-gw.tplinkcloud.com"
@@ -26,7 +25,8 @@ DEVICE_NAME = os.environ.get("DEVICE_NAME", "bathroom A").strip().lower()
 
 DEVICE_TYPES = ["SMART.TAPOPLUG", "SMART.TAPOBULB", "SMART.TAPOHUB",
                 "SMART.TAPOSWITCH", "SMART.IPCAMERA"]
-HIDE = {"deviceMac", "deviceId", "hwId", "fwId", "oemId", "appServerUrl", "alias"}
+HIDE = {"deviceMac", "deviceId", "hwId", "fwId", "oemId", "appServerUrl", "alias",
+        "accountApiUrl", "fwVer", "lastBindTime", "deviceHwVer"}
 
 CTX = ssl.create_default_context()
 CTX.load_verify_locations(get_ca_cert_path())
@@ -66,7 +66,11 @@ def tapo_login():
     try:
         api = TPLinkApi(cloud_type="tapo",
                         term_id=str(uuid.uuid5(uuid.NAMESPACE_DNS, "power-bot2-" + EMAIL)))
-        return api, api.login(EMAIL, PASSWORD).get("token")
+        res = api.login(EMAIL, PASSWORD) or {}
+        token = res.get("token")
+        print(f"[tapo login] host={api.host} token={'ok' if token else None} "
+              f"keys={list(res.keys())}")
+        return api, token
     except Exception as e:
         print(f"[tapo login] помилка: {type(e).__name__}: {e}")
         return None, None
@@ -79,7 +83,7 @@ def regional_status(api, token, host):
                                  {"deviceTypeList": DEVICE_TYPES, "index": 0, "limit": 50},
                                  token)
     except Exception as e:
-        print(f"[regional list] помилка: {type(e).__name__}")
+        print(f"[regional list] помилка: {type(e).__name__}: {e}")
         return {}
     devs = (r.result or {}).get("deviceList") or []
     print(f"[regional list] error_code={r.error_code} msg={r.msg!r} пристроїв={len(devs)}")
@@ -96,7 +100,7 @@ def passthrough(api, token, host, device_id):
                                  token)
         return r.error_code, r.msg
     except Exception as e:
-        return None, type(e).__name__
+        return None, f"{type(e).__name__}: {e}"
 
 
 def name_of(d):
@@ -124,6 +128,7 @@ def fmt_duration(seconds):
 
 
 def main():
+    print("=== версія 4 ===")
     token = login()
     devices = get_devices(token)
 
@@ -137,14 +142,16 @@ def main():
         sys.exit(f"Розетку {DEVICE_NAME!r} не знайдено.")
 
     online = dev.get("status") == 1
-    api, token2 = tapo_login()
     host = dev.get("appServerUrlV2")
+    api, token2 = tapo_login()
+    print(f"[debug] api={'ok' if api else None} token2={'ok' if token2 else None} host={host}")
+
     if api and token2 and host:
         statuses = regional_status(api, token2, host)
         for d in devices:
             code, msg = passthrough(api, token2, host, d.get("deviceId"))
             print(f"[passthrough] {name_of(d)!r} error_code={code} msg={msg!r}")
-        if dev.get("deviceId") in statuses and statuses[dev.get("deviceId")] is not None:
+        if statuses.get(dev.get("deviceId")) is not None:
             online = statuses[dev.get("deviceId")] == 1
             print(f"Статус з регіонального сервера: {'онлайн' if online else 'офлайн'}")
         else:
@@ -152,6 +159,7 @@ def main():
             if code is not None:
                 online = code == 0
                 print(f"Статус через passthrough: {'онлайн' if online else 'офлайн'}")
+
     now = dt.datetime.now(TZ)
 
     state = {}
