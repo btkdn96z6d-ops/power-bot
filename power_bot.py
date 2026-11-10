@@ -1,19 +1,16 @@
-"""
-Світлобот на розетці Tapo.
-Перевіряє через хмару TP-Link, чи розетка онлайн, і пише в Telegram,
-коли світло зникає або з'являється.
-"""
+"""Світлобот: стежить через хмару Tapo, чи розетка онлайн, і пише в Telegram."""
 import base64
+import hashlib
 import datetime as dt
 import json
 import os
 import sys
 import urllib.parse
 import urllib.request
-import uuid
 from zoneinfo import ZoneInfo
 
-CLOUD = "https://wap.tplinkcloud.com"
+from tplinkcloud.client import TPLinkApi
+
 STATE_FILE = "state.json"
 TZ = ZoneInfo("Europe/Kyiv")
 
@@ -22,54 +19,6 @@ PASSWORD = os.environ["TPLINK_PASSWORD"]
 TG_TOKEN = os.environ["TELEGRAM_TOKEN"]
 TG_CHAT = os.environ["TELEGRAM_CHAT_ID"]
 DEVICE_NAME = os.environ.get("DEVICE_NAME", "bathroom A").strip().lower()
-
-
-def post(url, payload):
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(req, timeout=30) as r:
-        return json.load(r)
-
-
-def login():
-    r = post(CLOUD, {
-        "method": "login",
-        "params": {
-            "appType": "Tapo_Ios",
-            "cloudUserName": EMAIL,
-            "cloudPassword": PASSWORD,
-            "terminalUUID": str(uuid.uuid5(uuid.NAMESPACE_DNS, EMAIL)),
-        },
-    })
-    if r.get("error_code") != 0:
-        sys.exit(f"Помилка входу в TP-Link: {r}")
-    return r["result"]["token"]
-
-
-def device_list(token):
-    r = post(f"{CLOUD}?token={token}", {"method": "getDeviceList"})
-    if r.get("error_code") != 0:
-        sys.exit(f"Помилка отримання списку пристроїв: {r}")
-    return r["result"]["deviceList"]
-
-
-def probe(token, d):
-    try:
-        r = post(f"{CLOUD}?token={token}", {
-            "method": "passthrough",
-            "params": {
-                "deviceId": d.get("deviceId"),
-                "requestData": json.dumps({"method": "get_device_info"}),
-            },
-        })
-    except Exception as e:
-        return None, f"exc:{e}"
-    code = r.get("error_code")
-    # -20571 = "Device is offline"
-    return code != -20571, code
 
 
 def name_of(d):
@@ -97,21 +46,23 @@ def fmt_duration(seconds):
 
 
 def main():
-    token = login()
-    devices = device_list(token)
+    api = TPLinkApi(cloud_type="tapo", term_id="power-bot-" + hashlib.md5(EMAIL.encode()).hexdigest()[:12])
+    try:
+        result = api.login(EMAIL, PASSWORD)
+    except Exception as e:
+        sys.exit(f"Помилка входу в хмару Tapo: {type(e).__name__}: {e}")
+    token = result.get("token")
+    devices = api.get_device_info_list(token)
 
-    print("Пристрої в акаунті:")
+    print("Пристрої в хмарі Tapo:")
     for d in devices:
-        on, code = probe(token, d)
-        print(f"  - {name_of(d)!r}  status={d.get('status')}  probe_code={code}  online={on}  model={d.get('deviceModel')}")
+        print(f"  - {name_of(d)!r}  status={d.get('status')}  model={d.get('deviceModel')}")
 
     dev = next((d for d in devices if name_of(d).strip().lower() == DEVICE_NAME), None)
     if dev is None:
         sys.exit(f"Розетку {DEVICE_NAME!r} не знайдено.")
 
-    online, code = probe(token, dev)
-    if online is None:
-        sys.exit(f"Не вдалося перевірити розетку: {code}")
+    online = dev.get("status") == 1
     now = dt.datetime.now(TZ)
 
     state = {}
