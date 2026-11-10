@@ -10,14 +10,12 @@ from zoneinfo import ZoneInfo
 
 from tplinkcloud.client import TPLinkApi
 
-# Має збігатися з TERM_ID у mfa_setup.py
 TERM_ID = "3f6b2c1e-8a4d-4f7b-9c2e-1d5a7e9b0c42"
 STATE_FILE = "state.json"
 TZ = ZoneInfo("Europe/Kyiv")
 
 EMAIL = os.environ["TPLINK_EMAIL"]
 PASSWORD = os.environ["TPLINK_PASSWORD"]
-REFRESH = os.environ.get("TAPO_REFRESH_TOKEN", "").strip()
 TG_TOKEN = os.environ["TELEGRAM_TOKEN"]
 TG_CHAT = os.environ["TELEGRAM_CHAT_ID"]
 DEVICE_NAME = os.environ.get("DEVICE_NAME", "bathroom A").strip().lower()
@@ -63,16 +61,7 @@ def fmt_duration(seconds):
 
 
 def get_token(api):
-    """Спершу токен оновлення, потім пароль (як прив'язаний пристрій)."""
     api.host = api._get_regional_url(EMAIL)
-    if REFRESH:
-        try:
-            res = api.refresh_login(REFRESH) or {}
-            if res.get("token"):
-                print("[auth] вхід через токен оновлення: ok")
-                return res["token"]
-        except Exception as e:
-            print(f"[auth] токен оновлення не спрацював: {type(e).__name__}")
     body = {"appType": api._app_type, "appVersion": api._app_ver,
             "cloudUserName": EMAIL, "cloudPassword": PASSWORD,
             "platform": "Android", "refreshTokenNeeded": True,
@@ -89,19 +78,32 @@ def get_token(api):
     return None
 
 
-def get_status(api, token):
+def get_devices(api, token):
     r = api._request_post_v2(api.host, "/api/v2/common/getDeviceListByPage",
                              {"deviceTypeList": DEVICE_TYPES, "index": 0, "limit": 50},
                              token)
     devs = (r.result or {}).get("deviceList") or []
-    print(f"[list] error_code={r.error_code} msg={r.msg!r} пристроїв={len(devs)}")
-    for d in devs:
-        print(f"   {name_of(d)!r} status={d.get('status')}")
+    print(f"[list] error_code={r.error_code} пристроїв={len(devs)}")
     return devs
 
 
+def is_online(api, token, d):
+    """Питаємо саму розетку через хмару. Відповіла — онлайн."""
+    host = d.get("appServerUrlV2") or api.host
+    try:
+        r = api._request_post_v2(host, "/api/v2/common/passthrough",
+                                 {"deviceId": d.get("deviceId"),
+                                  "requestData": json.dumps({"method": "get_device_info"})},
+                                 token)
+    except Exception as e:
+        print(f"[passthrough] {name_of(d)!r} помилка запиту: {type(e).__name__}")
+        return None
+    print(f"[passthrough] {name_of(d)!r} error_code={r.error_code} msg={r.msg!r}")
+    return r.error_code == 0
+
+
 def main():
-    print("=== версія 5 ===")
+    print("=== версія 6 ===")
     state = load_state()
     if state.get("auth_blocked"):
         sys.exit("Бот на паузі: TP-Link просив код. Повторіть mfa_setup.py "
@@ -114,14 +116,17 @@ def main():
         save_state(state)
         sys.exit("Вхід не вдався. Бот поставлено на паузу, щоб не блокувати акаунт.")
 
-    devs = get_status(api, token)
+    devs = get_devices(api, token)
+    results = {name_of(d): is_online(api, token, d) for d in devs}
+
     dev = next((d for d in devs if name_of(d).strip().lower() == DEVICE_NAME), None)
     if dev is None:
         sys.exit(f"Розетку {DEVICE_NAME!r} не знайдено.")
+    online = results.get(name_of(dev))
+    if online is None:
+        sys.exit("Не вдалося перевірити розетку, спробую наступного разу.")
 
-    online = dev.get("status") == 1
     now = dt.datetime.now(TZ)
-
     prev = state.get("online")
     if prev is None:
         print(f"Перший запуск: світло {'є' if online else 'немає'}.")
