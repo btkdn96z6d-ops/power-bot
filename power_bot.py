@@ -2,12 +2,6 @@
 Світлобот на розетці Tapo.
 Перевіряє через хмару TP-Link, чи розетка онлайн, і пише в Telegram,
 коли світло зникає або з'являється.
-
-Налаштування — через секрети GitHub (змінні середовища):
-  TPLINK_EMAIL, TPLINK_PASSWORD  — акаунт TP-Link (краще окремий, з доступом до розетки)
-  TELEGRAM_TOKEN                 — токен бота від @BotFather
-  TELEGRAM_CHAT_ID               — id каналу (напр. @my_channel або -100...)
-  DEVICE_NAME                    — назва розетки в Tapo (за замовчуванням "bathroom A")
 """
 import base64
 import datetime as dt
@@ -62,9 +56,25 @@ def device_list(token):
     return r["result"]["deviceList"]
 
 
+def probe(token, d):
+    try:
+        r = post(f"{CLOUD}?token={token}", {
+            "method": "passthrough",
+            "params": {
+                "deviceId": d.get("deviceId"),
+                "requestData": json.dumps({"method": "get_device_info"}),
+            },
+        })
+    except Exception as e:
+        return None, f"exc:{e}"
+    code = r.get("error_code")
+    # -20571 = "Device is offline"
+    return code != -20571, code
+
+
 def name_of(d):
     alias = d.get("alias") or d.get("deviceName") or ""
-    try:  # у Tapo назва часто закодована base64
+    try:
         decoded = base64.b64decode(alias, validate=True).decode("utf-8")
         if decoded.isprintable():
             return decoded
@@ -92,13 +102,16 @@ def main():
 
     print("Пристрої в акаунті:")
     for d in devices:
-        print(f"  - {name_of(d)!r}  status={d.get('status')}  model={d.get('deviceModel')}")
+        on, code = probe(token, d)
+        print(f"  - {name_of(d)!r}  status={d.get('status')}  probe_code={code}  online={on}  model={d.get('deviceModel')}")
 
     dev = next((d for d in devices if name_of(d).strip().lower() == DEVICE_NAME), None)
     if dev is None:
-        sys.exit(f"Розетку {DEVICE_NAME!r} не знайдено. Перевірте DEVICE_NAME.")
+        sys.exit(f"Розетку {DEVICE_NAME!r} не знайдено.")
 
-    online = dev.get("status") == 1
+    online, code = probe(token, dev)
+    if online is None:
+        sys.exit(f"Не вдалося перевірити розетку: {code}")
     now = dt.datetime.now(TZ)
 
     state = {}
