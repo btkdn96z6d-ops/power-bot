@@ -1,31 +1,26 @@
 {
-  "name": "power-monitor",
+  "name": "compliments",
   "on": {
-    "schedule": [{ "cron": "*/5 * * * *" }],
-    "workflow_dispatch": {}
+    "schedule": [{ "cron": "0 7 * * *" }],
+    "workflow_dispatch": {
+      "inputs": {
+        "text": { "description": "Свій текст (необов'язково)", "required": false }
+      }
+    }
   },
-  "permissions": { "contents": "write" },
-  "concurrency": { "group": "power-monitor", "cancel-in-progress": false },
   "jobs": {
-    "check": {
+    "send": {
       "runs-on": "ubuntu-latest",
       "steps": [
         { "uses": "actions/checkout@v4" },
-        { "name": "Install", "run": "pip install tplink-cloud-api==5.2.2" },
         {
-          "name": "Check power",
-          "run": "python3 power_bot.py",
+          "name": "Send compliment",
+          "run": "python3 compliment_bot.py",
           "env": {
-            "TPLINK_EMAIL": "${{ secrets.TPLINK_EMAIL }}",
-            "TPLINK_PASSWORD": "${{ secrets.TPLINK_PASSWORD }}",
             "TELEGRAM_TOKEN": "${{ secrets.TELEGRAM_TOKEN }}",
             "TELEGRAM_CHAT_ID": "${{ secrets.TELEGRAM_CHAT_ID }}",
-            "DEVICE_NAME": "bathroom A"
+            "CUSTOM_TEXT": "${{ inputs.text }}"
           }
-        },
-        {
-          "name": "Save state",
-          "run": "git config user.name power-bot\ngit config user.email power-bot@users.noreply.github.com\ngit add state.json\ngit diff --cached --quiet || (git commit -m state && git push)"
         }
       ]
     }
