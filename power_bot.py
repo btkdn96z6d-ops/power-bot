@@ -3,104 +3,39 @@ import base64
 import datetime as dt
 import json
 import os
-import ssl
 import sys
 import urllib.parse
 import urllib.request
-import uuid
 from zoneinfo import ZoneInfo
 
-from tplinkcloud.certs import get_ca_cert_path
 from tplinkcloud.client import TPLinkApi
 
-CLOUD = "https://n-wap-gw.tplinkcloud.com"
+# Має збігатися з TERM_ID у mfa_setup.py
+TERM_ID = "3f6b2c1e-8a4d-4f7b-9c2e-1d5a7e9b0c42"
 STATE_FILE = "state.json"
 TZ = ZoneInfo("Europe/Kyiv")
 
 EMAIL = os.environ["TPLINK_EMAIL"]
 PASSWORD = os.environ["TPLINK_PASSWORD"]
+REFRESH = os.environ.get("TAPO_REFRESH_TOKEN", "").strip()
 TG_TOKEN = os.environ["TELEGRAM_TOKEN"]
 TG_CHAT = os.environ["TELEGRAM_CHAT_ID"]
 DEVICE_NAME = os.environ.get("DEVICE_NAME", "bathroom A").strip().lower()
 
 DEVICE_TYPES = ["SMART.TAPOPLUG", "SMART.TAPOBULB", "SMART.TAPOHUB",
                 "SMART.TAPOSWITCH", "SMART.IPCAMERA"]
-HIDE = {"deviceMac", "deviceId", "hwId", "fwId", "oemId", "appServerUrl", "alias",
-        "accountApiUrl", "fwVer", "lastBindTime", "deviceHwVer"}
-
-CTX = ssl.create_default_context()
-CTX.load_verify_locations(get_ca_cert_path())
 
 
-def post(payload, token=None):
-    url = CLOUD + (f"?token={token}" if token else "")
-    req = urllib.request.Request(
-        url, data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(req, timeout=30, context=CTX) as r:
-        return json.load(r)
+def load_state():
+    if os.path.exists(STATE_FILE):
+        with open(STATE_FILE) as f:
+            return json.load(f)
+    return {}
 
 
-def login():
-    r = post({"method": "login", "params": {
-        "appType": "Tapo_Android",
-        "cloudUserName": EMAIL,
-        "cloudPassword": PASSWORD,
-        "terminalUUID": str(uuid.uuid5(uuid.NAMESPACE_DNS, "power-bot-" + EMAIL)),
-    }})
-    if r.get("error_code") != 0:
-        sys.exit(f"Помилка входу: error_code={r.get('error_code')} msg={r.get('msg')}")
-    return r["result"]["token"]
-
-
-def get_devices(token):
-    r = post({"method": "getDeviceListByPage", "params": {
-        "deviceTypeList": DEVICE_TYPES, "index": 0, "limit": 50}}, token)
-    print(f"[getDeviceListByPage] error_code={r.get('error_code')} msg={r.get('msg')!r}")
-    return (r.get("result") or {}).get("deviceList") or []
-
-
-def tapo_login():
-    """Вхід у нову хмару Tapo (з підписом запитів, як у застосунку)."""
-    try:
-        api = TPLinkApi(cloud_type="tapo",
-                        term_id=str(uuid.uuid5(uuid.NAMESPACE_DNS, "power-bot2-" + EMAIL)))
-        res = api.login(EMAIL, PASSWORD) or {}
-        token = res.get("token")
-        print(f"[tapo login] host={api.host} token={'ok' if token else None} "
-              f"keys={list(res.keys())}")
-        return api, token
-    except Exception as e:
-        print(f"[tapo login] помилка: {type(e).__name__}: {e}")
-        return None, None
-
-
-def regional_status(api, token, host):
-    """Список пристроїв з регіонального сервера Tapo: {deviceId: status}."""
-    try:
-        r = api._request_post_v2(host, "/api/v2/common/getDeviceListByPage",
-                                 {"deviceTypeList": DEVICE_TYPES, "index": 0, "limit": 50},
-                                 token)
-    except Exception as e:
-        print(f"[regional list] помилка: {type(e).__name__}: {e}")
-        return {}
-    devs = (r.result or {}).get("deviceList") or []
-    print(f"[regional list] error_code={r.error_code} msg={r.msg!r} пристроїв={len(devs)}")
-    for d in devs:
-        print(f"    {name_of(d)!r} status={d.get('status')}")
-    return {d.get("deviceId"): d.get("status") for d in devs}
-
-
-def passthrough(api, token, host, device_id):
-    try:
-        r = api._request_post_v2(host, "/api/v2/common/passthrough",
-                                 {"deviceId": device_id,
-                                  "requestData": json.dumps({"method": "get_device_info"})},
-                                 token)
-        return r.error_code, r.msg
-    except Exception as e:
-        return None, f"{type(e).__name__}: {e}"
+def save_state(state):
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f, ensure_ascii=False)
 
 
 def name_of(d):
@@ -127,45 +62,65 @@ def fmt_duration(seconds):
     return f"{h} год {m} хв" if h else f"{m} хв"
 
 
+def get_token(api):
+    """Спершу токен оновлення, потім пароль (як прив'язаний пристрій)."""
+    api.host = api._get_regional_url(EMAIL)
+    if REFRESH:
+        try:
+            res = api.refresh_login(REFRESH) or {}
+            if res.get("token"):
+                print("[auth] вхід через токен оновлення: ok")
+                return res["token"]
+        except Exception as e:
+            print(f"[auth] токен оновлення не спрацював: {type(e).__name__}")
+    body = {"appType": api._app_type, "appVersion": api._app_ver,
+            "cloudUserName": EMAIL, "cloudPassword": PASSWORD,
+            "platform": "Android", "refreshTokenNeeded": True,
+            "supportBindAccount": False, "terminalUUID": TERM_ID,
+            "terminalName": "power-bot", "terminalMeta": "power-bot"}
+    r = api._request_post_v2(api.host, "/api/v2/account/login", body)
+    res = r.result or {}
+    if res.get("token"):
+        print("[auth] вхід паролем: ok")
+        return res["token"]
+    print(f"[auth] вхід не вдався: error_code={r.error_code} "
+          f"mfa={'так' if res.get('MFAProcessId') else 'ні'} "
+          f"remainAttempts={res.get('remainAttempts')}")
+    return None
+
+
+def get_status(api, token):
+    r = api._request_post_v2(api.host, "/api/v2/common/getDeviceListByPage",
+                             {"deviceTypeList": DEVICE_TYPES, "index": 0, "limit": 50},
+                             token)
+    devs = (r.result or {}).get("deviceList") or []
+    print(f"[list] error_code={r.error_code} msg={r.msg!r} пристроїв={len(devs)}")
+    for d in devs:
+        print(f"   {name_of(d)!r} status={d.get('status')}")
+    return devs
+
+
 def main():
-    print("=== версія 4 ===")
-    token = login()
-    devices = get_devices(token)
+    print("=== версія 5 ===")
+    state = load_state()
+    if state.get("auth_blocked"):
+        sys.exit("Бот на паузі: TP-Link просив код. Повторіть mfa_setup.py "
+                 "і видаліть state.json.")
 
-    print("Пристрої в хмарі Tapo:")
-    for d in devices:
-        info = {k: v for k, v in d.items() if k not in HIDE}
-        print(f"  - {name_of(d)!r}  {info}")
+    api = TPLinkApi(cloud_type="tapo", term_id=TERM_ID)
+    token = get_token(api)
+    if not token:
+        state["auth_blocked"] = True
+        save_state(state)
+        sys.exit("Вхід не вдався. Бот поставлено на паузу, щоб не блокувати акаунт.")
 
-    dev = next((d for d in devices if name_of(d).strip().lower() == DEVICE_NAME), None)
+    devs = get_status(api, token)
+    dev = next((d for d in devs if name_of(d).strip().lower() == DEVICE_NAME), None)
     if dev is None:
         sys.exit(f"Розетку {DEVICE_NAME!r} не знайдено.")
 
     online = dev.get("status") == 1
-    host = dev.get("appServerUrlV2")
-    api, token2 = tapo_login()
-    print(f"[debug] api={'ok' if api else None} token2={'ok' if token2 else None} host={host}")
-
-    if api and token2 and host:
-        statuses = regional_status(api, token2, host)
-        for d in devices:
-            code, msg = passthrough(api, token2, host, d.get("deviceId"))
-            print(f"[passthrough] {name_of(d)!r} error_code={code} msg={msg!r}")
-        if statuses.get(dev.get("deviceId")) is not None:
-            online = statuses[dev.get("deviceId")] == 1
-            print(f"Статус з регіонального сервера: {'онлайн' if online else 'офлайн'}")
-        else:
-            code, _ = passthrough(api, token2, host, dev.get("deviceId"))
-            if code is not None:
-                online = code == 0
-                print(f"Статус через passthrough: {'онлайн' if online else 'офлайн'}")
-
     now = dt.datetime.now(TZ)
-
-    state = {}
-    if os.path.exists(STATE_FILE):
-        with open(STATE_FILE) as f:
-            state = json.load(f)
 
     prev = state.get("online")
     if prev is None:
@@ -184,8 +139,7 @@ def main():
     else:
         print(f"Без змін: світло {'є' if online else 'немає'}.")
 
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f, ensure_ascii=False)
+    save_state(state)
 
 
 if __name__ == "__main__":
