@@ -10,7 +10,7 @@ import urllib.request
 import uuid
 from zoneinfo import ZoneInfo
 
-from tplinkcloud.certs import get_ca_cert_path  # сертифікат TP-Link
+from tplinkcloud.certs import get_ca_cert_path
 
 CLOUD = "https://n-wap-gw.tplinkcloud.com"
 STATE_FILE = "state.json"
@@ -123,3 +123,7 @@ def main():
 
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, ensure_ascii=False)
+
+
+if __name__ == "__main__":
+    main()
